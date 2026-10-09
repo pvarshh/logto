@@ -1,24 +1,43 @@
 import type { Resource, CreateResource } from '@logto/schemas';
-import { Resources } from '@logto/schemas';
+import { managementApiIndicatorPattern, Resources } from '@logto/schemas';
 import type { CommonQueryMethods } from '@silverhand/slonik';
 import { sql } from '@silverhand/slonik';
 
 import { type WellKnownCache } from '#src/caches/well-known.js';
-import { buildFindAllEntitiesWithPool } from '#src/database/find-all-entities.js';
 import { buildFindEntityByIdWithPool } from '#src/database/find-entity-by-id.js';
 import { buildInsertIntoWithPool } from '#src/database/insert-into.js';
-import { getTotalRowCountWithPool } from '#src/database/row-count.js';
 import { buildUpdateWhereWithPool } from '#src/database/update-where.js';
 import { DeletionError, UpdateError } from '#src/errors/SlonikError/index.js';
 import type { OmitAutoSetFields } from '#src/utils/sql.js';
-import { convertToIdentifiers } from '#src/utils/sql.js';
+import { conditionalSql, convertToIdentifiers } from '#src/utils/sql.js';
 
 const { table, fields } = convertToIdentifiers(Resources);
 
-export const createResourceQueries = (pool: CommonQueryMethods, wellKnownCache: WellKnownCache) => {
-  const findTotalNumberOfResources = async () => getTotalRowCountWithPool(pool)(table);
+const buildManagementApiExclusion = (excludeManagementApi: boolean) =>
+  conditionalSql(
+    excludeManagementApi,
+    () => sql`where ${fields.indicator} !~ ${managementApiIndicatorPattern}`
+  );
 
-  const findAllResources = buildFindAllEntitiesWithPool(pool)(Resources);
+export const createResourceQueries = (pool: CommonQueryMethods, wellKnownCache: WellKnownCache) => {
+  const findTotalNumberOfResources = async (excludeManagementApi: boolean) => {
+    const { count } = await pool.one<{ count: string }>(sql`
+      select count(*)
+      from ${table}
+      ${buildManagementApiExclusion(excludeManagementApi)}
+    `);
+
+    return { count: Number(count) };
+  };
+
+  const findAllResources = async (excludeManagementApi: boolean, limit?: number, offset?: number) =>
+    pool.any<Resource>(sql`
+      select ${sql.join(Object.values(fields), sql`, `)}
+      from ${table}
+      ${buildManagementApiExclusion(excludeManagementApi)}
+      ${conditionalSql(limit, (value) => sql`limit ${value}`)}
+      ${conditionalSql(offset, (value) => sql`offset ${value}`)}
+    `);
 
   const findResourceByIndicator = wellKnownCache.memoize(
     async (indicator: string) =>
